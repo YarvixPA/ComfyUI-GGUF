@@ -5,6 +5,7 @@ import collections
 
 import nodes
 import comfy.sd
+import comfy.controlnet
 import comfy.lora
 import comfy.float
 import comfy.utils
@@ -30,6 +31,7 @@ def update_folder_names_and_paths(key, targets=[]):
 # Add a custom keys for files ending in .gguf
 update_folder_names_and_paths("unet_gguf", ["diffusion_models", "unet"])
 update_folder_names_and_paths("clip_gguf", ["text_encoders", "clip"])
+update_folder_names_and_paths("controlnet_gguf", ["controlnet"])
 
 class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
     patch_on_device = False
@@ -277,12 +279,12 @@ class QuadrupleCLIPLoaderGGUF(CLIPLoaderGGUF):
         file_options = (s.get_filename_list(), )
         return {
             "required": {
-            "clip_name1": file_options,
-            "clip_name2": file_options,
-            "clip_name3": file_options,
-            "clip_name4": file_options,
+                "clip_name1": file_options,
+                "clip_name2": file_options,
+                "clip_name3": file_options,
+                "clip_name4": file_options,
+            }
         }
-    }
 
     TITLE = "QuadrupleCLIPLoader (GGUF)"
 
@@ -295,11 +297,50 @@ class QuadrupleCLIPLoaderGGUF(CLIPLoaderGGUF):
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
         return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths)),)
 
+class ControlNetLoaderGGUF(nodes.ControlNetLoader):
+    @classmethod
+    def get_filename_list(cls):
+        files = list(folder_paths.get_filename_list("controlnet"))
+        files += folder_paths.get_filename_list("controlnet_gguf")
+        return sorted(files)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"control_net_name": (cls.get_filename_list(),)}}
+
+    RETURN_TYPES = ("CONTROL_NET",)
+    FUNCTION = "load_controlnet"
+    CATEGORY = "bootleg"
+    TITLE = "Load ControlNet Model (GGUF)"
+
+    def load_controlnet(self, control_net_name):
+        controlnet_path = folder_paths.get_full_path("controlnet", control_net_name)
+        if controlnet_path is None:
+            controlnet_path = folder_paths.get_full_path("controlnet_gguf", control_net_name)
+        if controlnet_path is None:
+            raise FileNotFoundError(f"Unable to locate ControlNet model: {control_net_name}")
+        if controlnet_path.endswith(".gguf"):
+            state_dict = gguf_sd_loader(controlnet_path, handle_prefix=None)
+            loader = getattr(comfy.sd, "load_controlnet_state_dict", None)
+            if loader is not None:
+                controlnet = loader(state_dict, model_options={"custom_operations": GGMLOps})
+            else:
+                fallback_loader = getattr(comfy.controlnet, "load_controlnet_state_dict", None)
+                if fallback_loader is None:
+                    raise RuntimeError("This version of ComfyUI does not support loading ControlNet state dicts.")
+                controlnet = fallback_loader(state_dict, model_options={"custom_operations": GGMLOps})
+            patcher = getattr(controlnet, "patcher", None)
+            if patcher is not None:
+                controlnet.patcher = GGUFModelPatcher.clone(controlnet.patcher)
+            return (controlnet,)
+        return super().load_controlnet(control_net_name)
+
 NODE_CLASS_MAPPINGS = {
     "UnetLoaderGGUF": UnetLoaderGGUF,
     "CLIPLoaderGGUF": CLIPLoaderGGUF,
     "DualCLIPLoaderGGUF": DualCLIPLoaderGGUF,
     "TripleCLIPLoaderGGUF": TripleCLIPLoaderGGUF,
     "QuadrupleCLIPLoaderGGUF": QuadrupleCLIPLoaderGGUF,
+    "ControlNetLoaderGGUF": ControlNetLoaderGGUF,
     "UnetLoaderGGUFAdvanced": UnetLoaderGGUFAdvanced,
 }

@@ -20,6 +20,7 @@ class ModelTemplate:
     keys_banned = []  # list of keys that should mark model as invalid for conversion
     keys_hiprec = []  # list of keys that need to be kept in fp32 for some reason
     keys_ignore = []  # list of strings to ignore keys by when found
+    keys_required_substrings = ()  # substrings that must appear in at least one tensor key
 
 class ModelFlux(ModelTemplate):
     arch = "flux"
@@ -69,6 +70,38 @@ class ModelCosmosPredict2(ModelTemplate):
     ]
     keys_hiprec = ["pos_embedder"]
     keys_ignore = ["_extra_state", "accum_"]
+
+class ModelControlNet(ModelTemplate):
+    arch = "ControlNetModel"
+    keys_required_substrings = ("controlnet_", "controlnet.")
+    keys_detect = [
+        (
+            "context_embedder.weight",
+            "controlnet_blocks.0.weight",
+            "controlnet_blocks.1.weight",
+            "controlnet_x_embedder.weight",
+        ),
+        (
+            "controlnet_mode_embedder.weight",
+            "controlnet_single_blocks.0.weight",
+            "single_transformer_blocks.0.attn.norm_k.weight",
+        ),
+        (
+            "img_in.weight",
+            "txt_in.weight",
+            "txt_norm.weight",
+        ),
+    ]
+    keys_hiprec = [
+        "context_embedder.",
+        "controlnet_mode_embedder.",
+        "controlnet_x_embedder.",
+        "time_text_embed.",
+        "img_in.",
+        "txt_in.",
+        "txt_norm.",
+        "x_embedder.",
+    ]
 
 class ModelQwenImage(ModelTemplate):
     arch = "qwen_image"
@@ -152,12 +185,20 @@ class ModelLumina2(ModelTemplate):
 
 # The architectures are checked in order and the first successful match terminates the search.
 arch_list = [
-    ModelFlux, ModelSD3, ModelAura, ModelHiDream, ModelCosmosPredict2, ModelQwenImage,
+    ModelControlNet, ModelFlux, ModelSD3, ModelAura, ModelHiDream, ModelCosmosPredict2, ModelQwenImage,
     ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1, ModelLumina2
 ]
 
 def is_model_arch(model, state_dict):
     # check if model is correct
+    keys = state_dict.keys()
+    required = getattr(model, "keys_required_substrings", ())
+    if required:
+        for substring in required:
+            if any(substring in key for key in keys):
+                break
+        else:
+            return False
     matched = False
     invalid = False
     for match_list in model.keys_detect:

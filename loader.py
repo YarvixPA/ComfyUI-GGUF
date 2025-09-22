@@ -8,6 +8,7 @@ from .ops import GGMLTensor
 from .dequant import is_quantized, dequantize_tensor
 
 IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image"}
+CN_ARCH_LIST = {"ControlNetModel"}
 TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl"}
 
 def get_orig_shape(reader, tensor_name):
@@ -82,7 +83,7 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=Fal
             raise ValueError(f"This model is not currently supported - ({e})")
     elif arch_str not in TXT_ARCH_LIST and is_text_model:
         raise ValueError(f"Unexpected text model architecture type in GGUF file: {arch_str!r}")
-    elif arch_str not in IMG_ARCH_LIST and not is_text_model:
+    elif arch_str not in IMG_ARCH_LIST and arch_str not in CN_ARCH_LIST and not is_text_model:
         raise ValueError(f"Unexpected architecture type in GGUF file: {arch_str!r}")
 
     if compat:

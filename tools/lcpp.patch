@@ -42,7 +42,7 @@ diff --git a/src/llama.cpp b/src/llama.cpp
 index 24e1f1f0..8a1e9ef8 100644
 --- a/src/llama.cpp
 +++ b/src/llama.cpp
-@@ -205,6 +205,18 @@ enum llm_arch {
+@@ -205,6 +205,19 @@
      LLM_ARCH_GRANITE,
      LLM_ARCH_GRANITE_MOE,
      LLM_ARCH_CHAMELEON,
@@ -58,10 +58,11 @@ index 24e1f1f0..8a1e9ef8 100644
 +    LLM_ARCH_COSMOS,
 +    LLM_ARCH_LUMINA2,
 +    LLM_ARCH_QWEN_IMAGE,
++    LLM_ARCH_CONTROLNET,
      LLM_ARCH_UNKNOWN,
  };
  
-@@ -258,6 +270,18 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
+@@ -258,6 +270,19 @@
      { LLM_ARCH_GRANITE,         "granite"      },
      { LLM_ARCH_GRANITE_MOE,     "granitemoe"   },
      { LLM_ARCH_CHAMELEON,       "chameleon"    },
@@ -77,10 +78,11 @@ index 24e1f1f0..8a1e9ef8 100644
 +    { LLM_ARCH_COSMOS,          "cosmos"       },
 +    { LLM_ARCH_LUMINA2,         "lumina2"      },
 +    { LLM_ARCH_QWEN_IMAGE,      "qwen_image"   },
++    { LLM_ARCH_CONTROLNET,      "ControlNetModel" },
      { LLM_ARCH_UNKNOWN,         "(unknown)"    },
  };
  
-@@ -1531,6 +1555,18 @@ static const std::map<llm_arch, std::map<llm_tensor, const char *>> LLM_TENSOR_N
+@@ -1531,6 +1555,19 @@
              { LLM_TENSOR_ATTN_K_NORM,     "blk.%d.attn_k_norm" },
          },
      },
@@ -96,10 +98,11 @@ index 24e1f1f0..8a1e9ef8 100644
 +    { LLM_ARCH_COSMOS,     {}},
 +    { LLM_ARCH_LUMINA2,    {}},
 +    { LLM_ARCH_QWEN_IMAGE, {}},
++    { LLM_ARCH_CONTROLNET, {}},
      {
          LLM_ARCH_UNKNOWN,
          {
-@@ -5403,6 +5439,26 @@ static void llm_load_hparams(
+@@ -5403,6 +5439,27 @@
      // get general kv
      ml.get_key(LLM_KV_GENERAL_NAME, model.name, false);
  
@@ -117,6 +120,7 @@ index 24e1f1f0..8a1e9ef8 100644
 +        case LLM_ARCH_COSMOS:
 +        case LLM_ARCH_LUMINA2:
 +        case LLM_ARCH_QWEN_IMAGE:
++        case LLM_ARCH_CONTROLNET:
 +            model.ftype = ml.ftype;
 +            return;
 +        default:
@@ -126,7 +130,7 @@ index 24e1f1f0..8a1e9ef8 100644
      // get hparams kv
      ml.get_key(LLM_KV_VOCAB_SIZE, hparams.n_vocab, false) || ml.get_arr_n(LLM_KV_TOKENIZER_LIST, hparams.n_vocab);
  
-@@ -18016,6 +18072,158 @@ static void llama_tensor_dequantize_internal(
+@@ -18016,6 +18072,160 @@
      workers.clear();
  }
  
@@ -136,11 +140,13 @@ index 24e1f1f0..8a1e9ef8 100644
 +    const llm_arch arch = qs.model.arch;
 +
 +    // Sanity check
++    const bool has_single_transformer = name.find("single_transformer_blocks.") != std::string::npos;
++    const bool has_joint_transformer = name.find("joint_transformer_blocks.") != std::string::npos;
++
 +    if (
 +            (name.find("model.diffusion_model.") != std::string::npos) ||
 +            (name.find("first_stage_model.") != std::string::npos) ||
-+            (name.find("single_transformer_blocks.") != std::string::npos) ||
-+            (name.find("joint_transformer_blocks.") != std::string::npos)
++            ((has_single_transformer || has_joint_transformer) && arch != LLM_ARCH_CONTROLNET)
 +        ) {
 +            throw std::runtime_error("Invalid input GGUF file. This is not a supported UNET model");
 +    }
@@ -232,7 +238,7 @@ index 24e1f1f0..8a1e9ef8 100644
 +    }
 +
 +    // first/last block high precision test
-+    if (arch == LLM_ARCH_QWEN_IMAGE){
++    if (arch == LLM_ARCH_QWEN_IMAGE || arch == LLM_ARCH_CONTROLNET){
 +        if (
 +            (name.find("transformer_blocks.0.") != std::string::npos) ||
 +            (name.find("transformer_blocks.59.") != std::string::npos) // this should be dynamic
@@ -354,7 +360,7 @@ index 24e1f1f0..8a1e9ef8 100644
      }
  
      // Set split info if needed
-@@ -18647,6 +18908,124 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18647,6 +18908,137 @@
          // do not quantize relative position bias (T5)
          quantize &= name.find("attn_rel_b.weight") == std::string::npos;
  
@@ -462,6 +468,19 @@ index 24e1f1f0..8a1e9ef8 100644
 +            quantize &= name.find("cap_embedder.") == std::string::npos;
 +            quantize &= name.find("context_refiner.") == std::string::npos;
 +            quantize &= name.find("noise_refiner.") == std::string::npos;
++        }
++        if (model.arch == LLM_ARCH_CONTROLNET) {
++            image_model = true;
++            quantize &= name.find("context_embedder.") == std::string::npos;
++            quantize &= name.find("controlnet_mode_embedder.") == std::string::npos;
++            quantize &= name.find("controlnet_x_embedder.") == std::string::npos;
++            quantize &= name.find("x_embedder.") == std::string::npos;
++            quantize &= name.find("img_in.") == std::string::npos;
++            quantize &= name.find("txt_in.") == std::string::npos;
++            quantize &= name.find("txt_norm.") == std::string::npos;
++            quantize &= name.find("time_text_embed.") == std::string::npos;
++            quantize &= name.find("proj_out.") == std::string::npos;
++            quantize &= name.find("norm_out.") == std::string::npos;
 +        }
 +        if (model.arch == LLM_ARCH_QWEN_IMAGE) {
 +            image_model = true;
