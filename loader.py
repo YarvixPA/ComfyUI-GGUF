@@ -3,6 +3,8 @@ import warnings
 import logging
 import torch
 import gguf
+import re
+import os
 
 from .ops import GGMLTensor
 from .dequant import is_quantized, dequantize_tensor
@@ -10,6 +12,7 @@ from .dequant import is_quantized, dequantize_tensor
 IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image"}
 CN_ARCH_LIST = {"ControlNetModel"}
 TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl"}
+VIS_TYPE_LIST = {"clip-vision"}
 
 def get_orig_shape(reader, tensor_name):
     field_key = f"comfy.gguf.orig_shape.{tensor_name}"
@@ -71,6 +74,7 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=Fal
     # detect and verify architecture
     compat = None
     arch_str = get_field(reader, "general.architecture", str)
+    type_str = get_field(reader, "general.type", str)
     if arch_str in [None, "pig"]:
         if is_text_model:
             raise ValueError(f"This text model is incompatible with llama.cpp!\nConsider using the safetensors version\n({path})")
@@ -78,11 +82,13 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=Fal
         # import here to avoid changes to convert.py breaking regular models
         from .tools.convert import detect_arch
         try:
-            arch_str = detect_arch(set(val[0] for val in tensors)).arch
+            arch_dict = {name: None for name, _ in tensors}
+            arch_str = detect_arch(arch_dict).arch
         except Exception as e:
             raise ValueError(f"This model is not currently supported - ({e})")
     elif arch_str not in TXT_ARCH_LIST and is_text_model:
-        raise ValueError(f"Unexpected text model architecture type in GGUF file: {arch_str!r}")
+        if type_str not in VIS_TYPE_LIST:
+            raise ValueError(f"Unexpected text model architecture type in GGUF file: {arch_str!r}")
     elif arch_str not in IMG_ARCH_LIST and arch_str not in CN_ARCH_LIST and not is_text_model:
         raise ValueError(f"Unexpected architecture type in GGUF file: {arch_str!r}")
 
@@ -123,7 +129,7 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=Fal
     logging.info("gguf qtypes: " + ", ".join(f"{k} ({v})" for k, v in qtype_dict.items()))
 
     # mark largest tensor for vram estimation
-    qsd = {k:v for k,v in state_dict.items() if is_quantized(v)}
+    qsd = {k: v for k, v in state_dict.items() if is_quantized(v)}
     if len(qsd) > 0:
         max_key = max(qsd.keys(), key=lambda k: qsd[k].numel())
         state_dict[max_key].is_largest_weight = True
@@ -166,25 +172,111 @@ LLAMA_SD_MAP = {
     "output.weight": "lm_head.weight",
 }
 
+CLIP_VISION_SD_MAP = {
+    "mm.": "visual.merger.mlp.",
+    "v.post_ln.": "visual.merger.ln_q.",
+    "v.patch_embd": "visual.patch_embed.proj",
+    "v.blk.": "visual.blocks.",
+    "ffn_up": "mlp.up_proj",
+    "ffn_down": "mlp.down_proj",
+    "ffn_gate": "mlp.gate_proj",
+    "attn_out.": "attn.proj.",
+    "ln1.": "norm1.",
+    "ln2.": "norm2.",
+}
+
 def sd_map_replace(raw_sd, key_map):
     sd = {}
-    for k,v in raw_sd.items():
-        for s,d in key_map.items():
-            k = k.replace(s,d)
-        sd[k] = v
+    for key, value in raw_sd.items():
+        for src, dst in key_map.items():
+            key = key.replace(src, dst)
+        sd[key] = value
     return sd
 
 def llama_permute(raw_sd, n_head, n_head_kv):
     # Reverse version of LlamaModel.permute in llama.cpp convert script
     sd = {}
-    permute = lambda x,h: x.reshape(h, x.shape[0] // h // 2, 2, *x.shape[1:]).swapaxes(1, 2).reshape(x.shape)
-    for k,v in raw_sd.items():
-        if k.endswith(("q_proj.weight", "q_proj.bias")):
-            v.data = permute(v.data, n_head)
-        if k.endswith(("k_proj.weight", "k_proj.bias")):
-            v.data = permute(v.data, n_head_kv)
-        sd[k] = v
+    permute = lambda x, h: x.reshape(h, x.shape[0] // h // 2, 2, *x.shape[1:]).swapaxes(1, 2).reshape(x.shape)
+    for key, value in raw_sd.items():
+        if key.endswith(("q_proj.weight", "q_proj.bias")):
+            value.data = permute(value.data, n_head)
+        if key.endswith(("k_proj.weight", "k_proj.bias")):
+            value.data = permute(value.data, n_head_kv)
+        sd[key] = value
     return sd
+
+def strip_quant_suffix(name):
+    pattern = r"[-_]?(?:ud-)?i?q[0-9]_[a-z0-9_\-]{1,8}$"
+    match = re.search(pattern, name, re.IGNORECASE)
+    if match:
+        name = name[:match.start()]
+    return name
+
+def gguf_mmproj_loader(path):
+    # Reverse version of Qwen2VLVisionModel.modify_tensors
+    logging.info("Attenpting to find mmproj file for text encoder...")
+
+    # get name to match w/o quant suffix
+    tenc_fname = os.path.basename(path)
+    tenc = os.path.splitext(tenc_fname)[0].lower()
+    tenc = strip_quant_suffix(tenc)
+
+    # try and find matching mmproj
+    target = []
+    root = os.path.dirname(path)
+    for fname in os.listdir(root):
+        name, ext = os.path.splitext(fname)
+        if ext.lower() != ".gguf":
+            continue
+        if "mmproj" not in name.lower():
+            continue
+        if tenc in name.lower():
+            target.append(fname)
+
+    if len(target) == 0:
+        logging.error(f"Error: Can't find mmproj file for '{tenc_fname}' (matching:'{tenc}')! Qwen-Image-Edit will be broken!")
+        return {}
+    if len(target) > 1:
+        logging.error(f"Ambiguous mmproj for text encoder '{tenc_fname}', will use first match.")
+
+    logging.info(f"Using mmproj '{target[0]}' for text encoder '{tenc_fname}'.")
+    target = os.path.join(root, target[0])
+    vsd = gguf_sd_loader(target, is_text_model=True)
+
+    # concat 4D to 5D
+    if "v.patch_embd.weight.1" in vsd:
+        w1 = dequantize_tensor(vsd.pop("v.patch_embd.weight"), dtype=torch.float32)
+        w2 = dequantize_tensor(vsd.pop("v.patch_embd.weight.1"), dtype=torch.float32)
+        vsd["v.patch_embd.weight"] = torch.stack([w1, w2], dim=2)
+
+    # run main replacement
+    vsd = sd_map_replace(vsd, CLIP_VISION_SD_MAP)
+
+    # handle split Q/K/V
+    if "visual.blocks.0.attn_q.weight" in vsd:
+        attns = {}
+        # filter out attentions + group
+        for key, value in vsd.items():
+            if any(x in key for x in ["attn_q", "attn_k", "attn_v"]):
+                key_attn, key_name = key.rsplit(".attn_", 1)
+                key_attn += ".attn.qkv." + key_name.split(".")[-1]
+                if key_attn not in attns:
+                    attns[key_attn] = {}
+                attns[key_attn][key_name] = dequantize_tensor(
+                    value, dtype=(torch.bfloat16 if is_quantized(value) else torch.float16)
+                )
+
+        # recombine
+        for key, value in attns.items():
+            suffix = key.split(".")[-1]
+            vsd[key] = torch.cat([
+                value[f"q.{suffix}"],
+                value[f"k.{suffix}"],
+                value[f"v.{suffix}"],
+            ], dim=0)
+        del attns
+
+    return vsd
 
 def gguf_tokenizer_loader(path, temb_shape):
     # convert gguf tokenizer to spiece
@@ -255,6 +347,9 @@ def gguf_clip_loader(path):
         sd = sd_map_replace(sd, LLAMA_SD_MAP)
         if arch == "llama":
             sd = llama_permute(sd, 32, 8) # L3
+        if arch == "qwen2vl":
+            vsd = gguf_mmproj_loader(path)
+            sd.update(vsd)
     else:
         pass
     return sd
