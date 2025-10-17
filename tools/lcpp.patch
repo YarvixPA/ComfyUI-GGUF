@@ -238,7 +238,27 @@ index 24e1f1f0..8a1e9ef8 100644
 +    }
 +
 +    // first/last block high precision test
-+    if (arch == LLM_ARCH_QWEN_IMAGE || arch == LLM_ARCH_CONTROLNET){
++    if (arch == LLM_ARCH_QWEN_IMAGE){
++        if (
++            (name.find("transformer_blocks.0.") != std::string::npos) ||
++            (name.find("transformer_blocks.59.") != std::string::npos) // this should be dynamic
++        ) {
++            if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_S || ftype == LLAMA_FTYPE_MOSTLY_Q2_K) {
++                new_type = GGML_TYPE_Q4_K;
++            }
++            else if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_M || ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L) {
++                new_type = GGML_TYPE_Q4_K;
++            }
++            else if (ftype == LLAMA_FTYPE_MOSTLY_Q4_K_M) {
++                new_type = GGML_TYPE_Q5_K;
++            }
++            else if (ftype == LLAMA_FTYPE_MOSTLY_Q5_K_M) {
++                new_type = GGML_TYPE_Q6_K;
++            }
++        }
++    }
+
++    if (arch == LLM_ARCH_CONTROLNET){
 +        if (
 +            (name.find("transformer_blocks.0.") != std::string::npos) ||
 +            (name.find("transformer_blocks.59.") != std::string::npos) // this should be dynamic
