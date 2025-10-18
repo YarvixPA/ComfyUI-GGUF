@@ -11,7 +11,7 @@ index de3c706f..0267c1fa 100644
  #endif
  
  #define GGML_DEFAULT_N_THREADS  4
-@@ -2449,6 +2449,7 @@ extern "C" {
+@@ -2449,6 +2449,7 @@
  
      // manage tensor info
      GGML_API void gguf_add_tensor(struct gguf_context * ctx, const struct ggml_tensor * tensor);
@@ -23,7 +23,7 @@ diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
 index b16c462f..6d1568f1 100644
 --- a/ggml/src/ggml.c
 +++ b/ggml/src/ggml.c
-@@ -22960,6 +22960,14 @@ void gguf_add_tensor(
+@@ -22960,6 +22960,14 @@
      ctx->header.n_tensors++;
  }
  
@@ -130,7 +130,7 @@ index 24e1f1f0..8a1e9ef8 100644
      // get hparams kv
      ml.get_key(LLM_KV_VOCAB_SIZE, hparams.n_vocab, false) || ml.get_arr_n(LLM_KV_TOKENIZER_LIST, hparams.n_vocab);
  
-@@ -18016,6 +18072,160 @@
+@@ -18016,6 +18072,185 @@
      workers.clear();
  }
  
@@ -243,21 +243,26 @@ index 24e1f1f0..8a1e9ef8 100644
 +            (name.find("transformer_blocks.0.") != std::string::npos) ||
 +            (name.find("transformer_blocks.59.") != std::string::npos) // this should be dynamic
 +        ) {
-+            if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_S || ftype == LLAMA_FTYPE_MOSTLY_Q2_K) {
-+                new_type = GGML_TYPE_Q4_K;
-+            }
-+            else if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_M || ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L) {
-+                new_type = GGML_TYPE_Q4_K;
-+            }
-+            else if (ftype == LLAMA_FTYPE_MOSTLY_Q4_K_M) {
++            if (ftype == LLAMA_FTYPE_MOSTLY_Q2_K) {
 +                new_type = GGML_TYPE_Q5_K;
++            }
++            else if (
++                ftype == LLAMA_FTYPE_MOSTLY_Q3_K_S ||
++                ftype == LLAMA_FTYPE_MOSTLY_Q3_K_M ||
++                ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L ||
++                ftype == LLAMA_FTYPE_MOSTLY_Q4_0   ||
++                ftype == LLAMA_FTYPE_MOSTLY_Q4_1   ||
++                ftype == LLAMA_FTYPE_MOSTLY_Q4_K_S ||
++                ftype == LLAMA_FTYPE_MOSTLY_Q4_K_M
++            ) {
++                new_type = GGML_TYPE_Q5_K; // Minimum Q5_K for low quants
 +            }
 +            else if (ftype == LLAMA_FTYPE_MOSTLY_Q5_K_M) {
 +                new_type = GGML_TYPE_Q6_K;
 +            }
 +        }
 +    }
-
++
 +    if (arch == LLM_ARCH_CONTROLNET){
 +        if (
 +            (name.find("transformer_blocks.0.") != std::string::npos) ||
@@ -311,7 +316,7 @@ index 24e1f1f0..8a1e9ef8 100644
  static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type new_type, const ggml_tensor * tensor, llama_ftype ftype) {
      const std::string name = ggml_get_name(tensor);
  
-@@ -18513,7 +18721,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18513,7 +18721,9 @@
          if (llama_model_has_encoder(&model)) {
              n_attn_layer *= 3;
          }
@@ -322,7 +327,7 @@ index 24e1f1f0..8a1e9ef8 100644
      }
  
      size_t total_size_org = 0;
-@@ -18547,6 +18757,57 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18547,6 +18757,57 @@
              ctx_outs[i_split] = gguf_init_empty();
          }
          gguf_add_tensor(ctx_outs[i_split], tensor);
@@ -518,7 +523,7 @@ index 24e1f1f0..8a1e9ef8 100644
          enum ggml_type new_type;
          void * new_data;
          size_t new_size;
-@@ -18655,6 +19034,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18655,6 +19034,9 @@
              new_type = default_type;
  
              // get more optimal quantization type based on the tensor shape, layer, etc.
@@ -528,7 +533,7 @@ index 24e1f1f0..8a1e9ef8 100644
              if (!params->pure && ggml_is_quantized(default_type)) {
                  new_type = llama_tensor_get_type(qs, new_type, tensor, ftype);
              }
-@@ -18664,6 +19046,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18664,6 +19046,7 @@
              if (params->output_tensor_type < GGML_TYPE_COUNT && strcmp(tensor->name, "output.weight") == 0) {
                  new_type = params->output_tensor_type;
              }
